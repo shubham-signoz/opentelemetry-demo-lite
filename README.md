@@ -52,7 +52,7 @@ You'll need an OTel Collector running on `localhost:4317` to receive telemetry.
 | Browser Simulator | 8090 | Generates load, records Web Vitals |
 | Accounting | 8091 | Consumes orders from Kafka |
 | Fraud Detection | 8092 | Scans orders (2% detection rate) |
-| Quote | 8093 | Calculates shipping costs |
+| Quote | 8094 | Calculates shipping costs |
 
 ## Telemetry
 
@@ -79,9 +79,36 @@ node load-test.js
 
 ## Configuration
 
-Environment variables:
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: Where to send telemetry (default: `http://localhost:4318`)
-- `OTEL_SERVICE_NAME`: Override service name
-- `COUNT`: Number of simulated requests per cycle
+Copy `.env.example` to `.env` and configure:
+
+```bash
+cp .env.example .env
+```
+
+Or pass environment variables directly:
+
+```bash
+OTLP_ENDPOINT=your-host:4317 OTLP_INSECURE=true docker-compose up
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTLP_ENDPOINT` | `ingest.us.signoz.cloud:443` | OTLP endpoint. For self-hosted use `your-host:4317` |
+| `SIGNOZ_INGESTION_KEY` | (empty) | SigNoz ingestion key (not needed for self-hosted) |
+| `OTLP_INSECURE` | `false` | Set `true` for self-hosted without TLS |
+| `OTLP_INSECURE_SKIP_VERIFY` | `false` | Set `true` to skip TLS cert verification |
+| `COUNT` | `5` | Number of simulated orders per cycle |
+
+### Load Test Mode
+
+Set `COUNT=0` to run services without generating traffic—useful for external load testing:
+
+```bash
+COUNT=0 docker-compose up
+```
+
+Services will run indefinitely and expose endpoints at `http://localhost:8080/api/*`.
 
 The collector uses `otlp` exporter for gRPC (port 4317). Edit `otel-collector-config.yaml` to point to your backend.
