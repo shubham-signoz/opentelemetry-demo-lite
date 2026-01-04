@@ -2,17 +2,20 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"os"
+	"runtime"
 	"time"
 
+	"github.com/shirou/gopsutil/v3/load"
 	"go.opentelemetry.io/contrib/instrumentation/host"
-	"go.opentelemetry.io/contrib/instrumentation/runtime"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -40,13 +43,17 @@ func InitTelemetry(ctx context.Context, serviceName string) *TelemetryProviders 
 	mp := initMeterProvider(ctx, res)
 	lp := initLoggerProvider(ctx, res)
 
-	if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(time.Second * 5)); err != nil {
+	if err := otelruntime.Start(otelruntime.WithMinimumReadMemStatsInterval(time.Second * 5)); err != nil {
 		log.Printf("failed to start runtime metrics: %v", err)
 	}
 
+	// Start standard host metrics for CPU (system.cpu.time)
 	if err := host.Start(host.WithMeterProvider(mp)); err != nil {
 		log.Printf("failed to start host metrics: %v", err)
 	}
+
+	// Start custom metrics for load averages and memory
+	startHostMetrics(mp)
 
 	// Set global propagator for context propagation
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -63,7 +70,7 @@ func InitTelemetry(ctx context.Context, serviceName string) *TelemetryProviders 
 }
 
 func initResource(serviceName string) *sdkresource.Resource {
-	hostname, _ := os.Hostname()
+	hostName := fmt.Sprintf("%s-host", serviceName)
 
 	res, err := sdkresource.New(
 		context.Background(),
@@ -71,11 +78,11 @@ func initResource(serviceName string) *sdkresource.Resource {
 			semconv.ServiceName(serviceName),
 			semconv.ServiceVersion(serviceVersion),
 			semconv.TelemetrySDKLanguageGo,
-			semconv.HostName(hostname),
+			semconv.HostName(hostName),
+			attribute.String("os.type", runtime.GOOS),
 			attribute.String("deployment.environment", "demo"),
 			attribute.String("container.runtime", "docker"),
 		),
-		sdkresource.WithHost(),
 		sdkresource.WithProcess(),
 		sdkresource.WithContainer(),
 	)
@@ -134,5 +141,32 @@ func (t *TelemetryProviders) Shutdown(ctx context.Context) {
 	}
 	if t.LoggerProvider != nil {
 		t.LoggerProvider.Shutdown(ctx)
+	}
+}
+
+func startHostMetrics(mp *sdkmetric.MeterProvider) {
+	meter := mp.Meter("host-metrics")
+
+	loadAvg15m, _ := meter.Float64ObservableGauge("system.cpu.load_average.15m",
+		metric.WithDescription("15-minute CPU load average"), metric.WithUnit("1"))
+	loadAvg1m, _ := meter.Float64ObservableGauge("system.cpu.load_average.1m",
+		metric.WithDescription("1-minute CPU load average"), metric.WithUnit("1"))
+	loadAvg5m, _ := meter.Float64ObservableGauge("system.cpu.load_average.5m",
+		metric.WithDescription("5-minute CPU load average"), metric.WithUnit("1"))
+
+	// Register callback for load averages
+	_, err := meter.RegisterCallback(
+		func(ctx context.Context, observer metric.Observer) error {
+			if loadAvg, err := load.Avg(); err == nil {
+				observer.ObserveFloat64(loadAvg1m, loadAvg.Load1)
+				observer.ObserveFloat64(loadAvg5m, loadAvg.Load5)
+				observer.ObserveFloat64(loadAvg15m, loadAvg.Load15)
+			}
+			return nil
+		},
+		loadAvg1m, loadAvg5m, loadAvg15m,
+	)
+	if err != nil {
+		log.Printf("failed to register host metrics callback: %v", err)
 	}
 }

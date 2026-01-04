@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -62,7 +63,7 @@ func initCartMetrics() {
 	}
 }
 
-func initRedisClient() {
+func initRedisClient(tp *sdktrace.TracerProvider) {
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
@@ -74,8 +75,8 @@ func initRedisClient() {
 		DB:       0,
 	})
 
-	// Add OpenTelemetry auto-instrumentation for Redis
 	if err := redisotel.InstrumentTracing(redisClient,
+		redisotel.WithTracerProvider(tp),
 		redisotel.WithAttributes(
 			attribute.String("db.system", "redis"),
 			attribute.String("db.name", "cart"),
@@ -95,10 +96,10 @@ func initRedisClient() {
 	}
 }
 
-func RunCartService(tp trace.TracerProvider, lp otellog.LoggerProvider) {
+func RunCartService(tp *sdktrace.TracerProvider, lp otellog.LoggerProvider) {
 	cartLogger = otelslog.NewLogger("cart", otelslog.WithLoggerProvider(lp))
 	initCartMetrics()
-	initRedisClient()
+	initRedisClient(tp)
 
 	addHandler := otelhttp.NewHandler(
 		http.HandlerFunc(addItemHandler),
@@ -155,7 +156,6 @@ func addItemHandler(w http.ResponseWriter, r *http.Request) {
 	item := CartItem{ProductID: productID, Quantity: quantity}
 	itemJSON, _ := json.Marshal(item)
 
-	// Use Redis HSET - auto-instrumented by otelredis
 	cartKey := fmt.Sprintf("cart:%s", userID)
 	err := redisClient.HSet(ctx, cartKey, productID, itemJSON).Err()
 	if err != nil {
@@ -165,7 +165,6 @@ func addItemHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set expiration (1 hour) - auto-instrumented
 	redisClient.Expire(ctx, cartKey, time.Hour)
 
 	duration := float64(time.Since(start).Milliseconds())
@@ -197,7 +196,6 @@ func getCartHandler(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("app.user.id", userID))
 	span.AddEvent("Fetch cart")
 
-	// Use Redis HGETALL - auto-instrumented by otelredis
 	cartKey := fmt.Sprintf("cart:%s", userID)
 	items, err := redisClient.HGetAll(ctx, cartKey).Result()
 	if err != nil {
@@ -244,7 +242,6 @@ func emptyCartHandler(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("app.user.id", userID))
 	span.AddEvent("Empty cart")
 
-	// Use Redis DEL - auto-instrumented by otelredis
 	cartKey := fmt.Sprintf("cart:%s", userID)
 	err := redisClient.Del(ctx, cartKey).Err()
 	if err != nil {

@@ -80,7 +80,6 @@ func shipHandler(w http.ResponseWriter, r *http.Request) {
 
 	shippingLogger.InfoContext(ctx, "Processing shipping request")
 
-	// Create quote from count (like Rust shipping service)
 	itemCount := rand.Intn(5) + 1
 	quote, err := createQuoteFromCount(ctx, itemCount)
 	if err != nil {
@@ -97,7 +96,6 @@ func shipHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Float64("app.shipping.cost.total", quote),
 	)
 
-	// Add event like Rust service
 	span.AddEvent("Received Quote", trace.WithAttributes(
 		attribute.Float64("app.shipping.cost.total", quote),
 	))

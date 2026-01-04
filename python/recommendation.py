@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, Request
 from opentelemetry import trace, metrics
+from opentelemetry.metrics import Observation
 from opentelemetry.instrumentation.system_metrics import SystemMetricsInstrumentor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] - %(message)s')
@@ -75,10 +76,57 @@ def get_product_list(exclude_ids: List[str]) -> List[dict]:
         return recommendations
 
 
+def get_load_averages():
+    """Get system load averages (1m, 5m, 15m)"""
+    return os.getloadavg()
+
+
 @app.on_event("startup")
 async def startup_event():
-    SystemMetricsInstrumentor().instrument()
-    logger.info("System metrics instrumentation started")
+    SystemMetricsInstrumentor(config={
+        "system.cpu.time": ["idle", "user", "system", "irq"],
+        "system.cpu.utilization": ["idle", "user", "system", "irq"],
+        "system.memory.usage": ["used", "free"],
+        "system.memory.utilization": ["used", "free"],
+        "system.swap.usage": None,
+        "system.swap.utilization": None,
+        "system.disk.io": None,
+        "system.disk.operations": None,
+        "system.disk.time": None,
+        "system.network.io": None,
+        "system.network.packets": None,
+        "system.network.errors": None,
+        "system.network.dropped_packets": None,
+        "system.network.connections": None,
+        "process.runtime.memory": ["rss", "vms"],
+        "process.runtime.cpu.time": ["user", "system"],
+        "process.runtime.cpython.context_switches": None,
+    }).instrument()
+
+    host_meter = metrics.get_meter("host-metrics")
+
+    host_meter.create_observable_gauge(
+        "system.cpu.load_average.1m",
+        callbacks=[lambda options: [Observation(get_load_averages()[0])]],
+        description="1-minute CPU load average",
+        unit="1"
+    )
+
+    host_meter.create_observable_gauge(
+        "system.cpu.load_average.5m",
+        callbacks=[lambda options: [Observation(get_load_averages()[1])]],
+        description="5-minute CPU load average",
+        unit="1"
+    )
+
+    host_meter.create_observable_gauge(
+        "system.cpu.load_average.15m",
+        callbacks=[lambda options: [Observation(get_load_averages()[2])]],
+        description="15-minute CPU load average",
+        unit="1"
+    )
+
+    logger.info("Host metrics instrumentation started")
     logger.info(f"Recommendation Service starting on port {os.getenv('PORT', '8086')}")
 
 

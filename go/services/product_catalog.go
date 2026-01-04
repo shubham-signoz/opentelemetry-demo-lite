@@ -1,18 +1,24 @@
 package services
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"strings"
 
+	"github.com/XSAM/otelsql"
+	_ "github.com/mattn/go-sqlite3"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -43,6 +49,55 @@ var products = []Product{
 	{ID: "6E92ZMYYFZ", Name: "Mug", Description: "Ceramic coffee mug", Price: 12.99, Categories: []string{"home"}},
 }
 
+var sqliteDB *sql.DB
+
+func initSQLite(tp *sdktrace.TracerProvider) {
+	db, err := otelsql.Open("sqlite3", "file::memory:?cache=shared",
+		otelsql.WithAttributes(
+			attribute.String("db.system", "sqlite"),
+			attribute.String("db.name", "products"),
+		),
+		otelsql.WithTracerProvider(tp),
+	)
+	if err != nil {
+		log.Printf("Failed to open SQLite: %v", err)
+		return
+	}
+
+	// Register DB stats metrics
+	if err := otelsql.RegisterDBStatsMetrics(db,
+		otelsql.WithAttributes(attribute.String("db.system", "sqlite")),
+	); err != nil {
+		log.Printf("Failed to register SQLite metrics: %v", err)
+	}
+
+	sqliteDB = db
+
+	// Create and seed products table - use ExecContext for instrumentation
+	ctx := context.Background()
+	_, err = sqliteDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS products (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		description TEXT,
+		price REAL,
+		categories TEXT
+	)`)
+	if err != nil {
+		log.Printf("Failed to create products table: %v", err)
+		return
+	}
+
+	// Seed from existing products slice
+	for _, p := range products {
+		_, err := sqliteDB.ExecContext(ctx, `INSERT OR REPLACE INTO products VALUES (?, ?, ?, ?, ?)`,
+			p.ID, p.Name, p.Description, p.Price, strings.Join(p.Categories, ","))
+		if err != nil {
+			log.Printf("Failed to insert product %s: %v", p.ID, err)
+		}
+	}
+	log.Printf("SQLite initialized with %d products", len(products))
+}
+
 func initProductMetrics() {
 	productMeter = otel.Meter("product-catalog")
 	var err error
@@ -55,9 +110,10 @@ func initProductMetrics() {
 	}
 }
 
-func RunProductCatalogService(tp trace.TracerProvider, lp otellog.LoggerProvider) {
+func RunProductCatalogService(tp *sdktrace.TracerProvider, lp otellog.LoggerProvider) {
 	productLogger = otelslog.NewLogger("product-catalog", otelslog.WithLoggerProvider(lp))
 	initProductMetrics()
+	initSQLite(tp)
 
 	listHandler := otelhttp.NewHandler(
 		http.HandlerFunc(listProductsHandler),
@@ -126,22 +182,23 @@ func getProductHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.String("rpc.method", "GetProduct"),
 	)
 
-	// Find product
-	var found *Product
-	for _, p := range products {
-		if p.ID == id {
-			found = &p
-			break
-		}
-	}
+	var found Product
+	err := sqliteDB.QueryRowContext(ctx,
+		`SELECT id, name, description, price FROM products WHERE id = ?`, id).
+		Scan(&found.ID, &found.Name, &found.Description, &found.Price)
 
-	if found == nil {
+	if err == sql.ErrNoRows {
 		span.SetAttributes(attribute.Bool("product.found", false))
 		productCounter.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("method", "GetProduct"),
 			attribute.String("status", "not_found"),
 		))
 		http.Error(w, "Product not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		span.RecordError(err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
