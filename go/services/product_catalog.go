@@ -65,7 +65,7 @@ func initSQLite(tp *sdktrace.TracerProvider) {
 	}
 
 	// Register DB stats metrics
-	if err := otelsql.RegisterDBStatsMetrics(db,
+	if _, err := otelsql.RegisterDBStatsMetrics(db,
 		otelsql.WithAttributes(attribute.String("db.system", "sqlite")),
 	); err != nil {
 		log.Printf("Failed to register SQLite metrics: %v", err)
